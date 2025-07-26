@@ -4,64 +4,59 @@ module.exports = async (req, res) => {
   const { tmdbId } = req.query;
 
   if (!tmdbId) {
-    return res.status(400).json({ error: 'tmdbId is required' });
+    return res.status(400).json({ error: 'Missing tmdbId' });
   }
 
   try {
-    // Step 1: Get movie details from TMDB to extract title
-    const tmdbUrl = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=ea97a714a43a0e3481592c37d2c7178a`;
-    const tmdbResponse = await axios.get(tmdbUrl);
-    const movieTitle = tmdbResponse.data.title;
-
-    // Step 2: Get subjectId from moviebox
-    const searchUrl = `https://moviebox.ph/wefeed-h5-bff/web/search/page?size=24&sort=3&page=1&word=${encodeURIComponent(movieTitle)}`;
-    const searchRes = await axios.get(searchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://moviebox.ph',
-        'Origin': 'https://moviebox.ph'
+    // 1. Fetch TMDB movie data
+    const tmdbRes = await axios.get(`https://api.themoviedb.org/3/movie/${tmdbId}`, {
+      params: {
+        api_key: 'ea97a714a43a0e3481592c37d2c7178a'
       }
     });
+    const movieTitle = tmdbRes.data.title;
+    console.log('🎬 TMDB Title:', movieTitle);
 
-    const items = searchRes.data?.data?.list || [];
-    const matched = items.find(item => item.name?.toLowerCase() === movieTitle.toLowerCase());
+    // 2. Search Moviebox by title
+    const searchUrl = `https://moviebox.ph/wefeed-h5-bff/web/search/page?size=24&sort=3&page=1&word=${encodeURIComponent(movieTitle)}`;
+    const searchRes = await axios.get(searchUrl);
+    const items = searchRes.data.data?.list || [];
 
-    if (!matched) {
+    if (!items.length) {
+      return res.status(404).json({ error: 'No search results from Moviebox' });
+    }
+
+    console.log('🔎 Moviebox Titles:');
+    items.forEach(item => console.log('–', item.name));
+
+    // 3. Try to find an exact or partial match
+    const matched = items.find(item =>
+      item.name?.toLowerCase().includes(movieTitle.toLowerCase())
+    );
+
+    if (!matched || !matched.subjectId) {
       return res.status(404).json({ error: 'subjectId not found' });
     }
 
-    const subjectId = matched.id;
+    // 4. Fetch video playback link
+    const subjectId = matched.subjectId;
+    const playRes = await axios.get(`https://moviebox.ph/wefeed-h5-bff/web/play/getPlayInfo?id=${subjectId}`);
+    const playData = playRes.data?.data;
 
-    // Step 3: Get download links
-    const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}`;
-    const downloadRes = await axios.get(downloadUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://moviebox.ph',
-        'Origin': 'https://moviebox.ph',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Accept': 'application/json, text/plain, */*'
-      }
-    });
-
-    return res.status(200).json({ downloadLinks: downloadRes.data });
-
-  } catch (err) {
-    console.error('❌ Server error:', err.message);
-
-    if (err.response) {
-      console.error('🔍 Status:', err.response.status);
-      console.error('🔍 Headers:', err.response.headers);
-      console.error('🔍 Data:', err.response.data);
-
-      return res.status(err.response.status).json({
-        error: 'Request blocked or failed',
-        status: err.response.status,
-        headers: err.response.headers,
-        data: err.response.data
-      });
+    if (!playData || !playData.playInfoList?.length) {
+      return res.status(404).json({ error: 'No play info found' });
     }
 
-    return res.status(500).json({ error: err.message });
+    // 5. Return result
+    return res.json({
+      title: matched.name,
+      subjectId,
+      sources: playData.playInfoList
+    });
+
+  } catch (err) {
+    console.error('🔥 API Error:', err.message);
+    return res.status(403).json({ error: 'Request failed with status code 403' });
   }
 };
+
