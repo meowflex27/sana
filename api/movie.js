@@ -2,15 +2,10 @@ const axios = require('axios');
 
 const TMDB_API_KEY = 'ea97a714a43a0e3481592c37d2c7178a';
 
-// Fuzzy matching to tolerate slight differences
 function extractSubjectId(html, movieTitle) {
-  const titlePattern = movieTitle
-    .replace(/['’"]/g, '.')             // Tolerate quotes
-    .replace(/[^a-zA-Z0-9]+/g, '.*')    // Loose pattern
-    .toLowerCase();
-
-  const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*".*${titlePattern}.*"`, 'i');
-  const match = html.toLowerCase().match(regex);
+  const escapedTitle = movieTitle.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+  const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*"${escapedTitle}"`, 'i');
+  const match = html.match(regex);
   return match ? match[1] : null;
 }
 
@@ -42,63 +37,51 @@ module.exports = async (req, res) => {
   if (!tmdbId) return res.status(400).json({ error: 'Missing tmdbId' });
 
   try {
-    // STEP 1: Get title/year from TMDB
     const tmdbResp = await axios.get(`https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`);
     const title = tmdbResp.data.title;
     const year = tmdbResp.data.release_date?.split('-')[0];
-    console.log('🎬 TMDB Title:', title, '| Year:', year);
+    const keyword = `${title} ${year}`;
 
-    // STEP 2: Search Moviebox
-    const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(`${title} ${year}`)}`;
-    console.log('🌐 Searching Moviebox:', searchUrl);
-
+    const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(keyword)}`;
     const searchResp = await axios.get(searchUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Referer': 'https://moviebox.ph/',
-        'Accept': 'text/html'
+        'Accept': 'text/html,application/xhtml+xml',
       }
     });
 
     const html = searchResp.data;
     const subjectId = extractSubjectId(html, title);
-    if (!subjectId) {
-      console.warn('❌ subjectId not found for:', title);
-      return res.status(404).json({ error: 'subjectId not found' });
-    }
+    if (!subjectId) return res.status(404).json({ error: 'subjectId not found' });
 
-    // STEP 3: Build detail path
     const detailPath = extractDetailPathFromHtml(html, subjectId, title);
     const detailsUrl = detailPath ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}` : null;
-    console.log('🆔 subjectId:', subjectId);
-    console.log('🔗 detailPath:', detailPath);
 
-    // STEP 4: Download request
+    // 💥 Main request that may fail
     const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=0&ep=0`;
-    console.log('⬇️ Downloading from:', downloadUrl);
 
-    const headers = {
-      'accept': 'application/json',
-      'accept-encoding': 'gzip, deflate, br, zstd',
-      'accept-language': 'en-US,en;q=0.9',
-      'cache-control': 'no-cache',
-      'pragma': 'no-cache',
-      'referer': detailsUrl,
-      'sec-ch-ua': '"Chromium";v="114", "Google Chrome";v="114", "Not=A?Brand";v="24"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"',
-      'sec-fetch-dest': 'empty',
-      'sec-fetch-mode': 'cors',
-      'sec-fetch-site': 'same-origin',
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
-      'x-client-info': JSON.stringify({ timezone: 'Asia/Manila' }),
-      'x-source': 'h5',
-      'cookie': 'i18n_lang=en; account=6328836939160473392|0|H5|1744461404|'
-    };
+    const downloadResp = await axios.get(downloadUrl, {
+      headers: {
+        'referer': detailsUrl || 'https://moviebox.ph/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'x-client-info': JSON.stringify({ timezone: 'Asia/Manila' }),
+        'x-source': 'h5',
+        'cookie': 'i18n_lang=en'
+      },
+      validateStatus: function (status) {
+        return status >= 200 && status < 500; // allow 4xx to be handled manually
+      }
+    });
 
-    const downloadResp = await axios.get(downloadUrl, { headers });
+    if (downloadResp.status === 403) {
+      return res.status(403).json({ error: 'Access forbidden: 403. The site may be blocking non-browser requests.' });
+    }
 
-    return res.json({
+    if (downloadResp.status !== 200) {
+      return res.status(downloadResp.status).json({ error: `Unexpected status: ${downloadResp.status}` });
+    }
+
+    res.json({
       title,
       year,
       subjectId,
@@ -106,9 +89,8 @@ module.exports = async (req, res) => {
       detailsUrl: detailsUrl || 'Unavailable',
       downloadData: downloadResp.data
     });
-
   } catch (err) {
-    console.error('❌ Movie API error:', err.message);
-    return res.status(500).json({ error: err.message });
+    console.error('Movie error:', err.response?.data || err.message);
+    res.status(500).json({ error: err.message });
   }
 };
